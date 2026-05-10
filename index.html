@@ -1064,6 +1064,9 @@ placeholder="輸入環保盒數量">
 
 <script>
 
+const API_BASE = "http://localhost:5000";
+
+
 let userId = "USER001";
 
 let canCup = 3;
@@ -1117,6 +1120,33 @@ let stations = {
 
 };
 
+function syncUserState(user){
+    if(!user){ return; }
+
+    userId = user.id;
+    canCup = user.canCup;
+    borrowedCup = user.borrowedCup;
+    canBox = user.canBox;
+    borrowedBox = user.borrowedBox;
+    maxCup = user.maxCup;
+    maxBox = user.maxBox;
+    carbonFund = user.carbonFund;
+}
+
+async function refreshUserState(){
+    try{
+        let res = await fetch(API_BASE + "/state?user_id=" + encodeURIComponent(userId));
+        let data = await res.json();
+
+        if(data.status === "success"){
+            syncUserState(data.user);
+            updateInventory();
+        }
+    }catch(e){
+        console.log("state refresh failed", e);
+    }
+}
+
 function register(){
 
 let phone =
@@ -1134,46 +1164,38 @@ document.getElementById("registerInfo").innerHTML =
 
 }
 
-function login(){
+async function login(){
 
 let phone =
 document.getElementById("phone").value;
 
-if(phone !== ""){
-
-userId = "USER-" + phone.slice(-6);
-
-if(phone.length >= 6){
-
-let last6 =
-phone.slice(-6);
-
-canCup =
-Number(last6[0]);
-
-borrowedCup =
-Number(last6[1] + last6[2]);
-
-canBox =
-Number(last6[3]);
-
-borrowedBox =
-Number(last6[4] + last6[5]);
-
-if(canCup > maxCup){
-canCup = maxCup;
+if(phone.length < 6){
+alert("手機號碼至少需要 6 位數");
+return;
 }
 
-if(canBox > maxBox){
-canBox = maxBox;
-}
+try{
+    let response = await fetch(API_BASE + "/login", {
+        method:"POST",
+        headers:{ "Content-Type":"application/json" },
+        body:JSON.stringify({ phone: phone })
+    });
+
+    let data = await response.json();
+
+    if(data.status !== "success"){
+        alert(data.message || "登入失敗");
+        return;
+    }
+
+    syncUserState(data.user);
+
+}catch(error){
+
+    alert("無法連接伺服器，請先啟動 server.py");
+    return;
 
 }
-
-}
-
-carbonFund =
-0;
 
 hideAllPages();
 
@@ -1438,25 +1460,41 @@ setInterval(updatePrizeStrip,5000);
 
 updatePrizeStrip();
 
-function exchangePrize(index){
+async function exchangePrize(index){
 
 let prize =
 prizes[index];
 
-if(carbonFund < prize.price){
+try{
+    let response = await fetch(API_BASE + "/exchange", {
+        method:"POST",
+        headers:{ "Content-Type":"application/json" },
+        body:JSON.stringify({
+            user:userId,
+            name:prize.name,
+            price:prize.price
+        })
+    });
 
-alert("減碳額度不足");
-return;
+    let data = await response.json();
+
+    if(data.status !== "success"){
+        alert(data.message || "兌換失敗");
+        return;
+    }
+
+    syncUserState(data.user);
+    prize.redeemed = data.redeemed[prize.name] || (prize.redeemed + 1);
+
+    alert("成功兌換：" + prize.name);
+
+    updateInventory();
+
+}catch(error){
+
+    alert("無法連接伺服器，請確認 server.py 已啟動。");
 
 }
-
-carbonFund -= prize.price;
-
-prize.redeemed++;
-
-alert("成功兌換：" + prize.name);
-
-updateInventory();
 
 }
 
@@ -1594,7 +1632,7 @@ async function pairStationByNumber() {
   if (stationCode === "") { showStationResult("請輸入站點編號。", true); return; }
 
   try {
-    let response = await fetch("https://estimate-lustrous-huff.ngrok-free.dev/pair", {
+    let response = await fetch(API_BASE + "/pair", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ station_id: stationCode })
@@ -1629,77 +1667,25 @@ function setStationMode(mode) {
 }
 
 async function submitStationRequest() {
-  if (!pairedStation) { showStationResult("尚未配對站點。", true); return; }
-
-  if (stationMode === "return") {
-    let borrowedCupCount = maxCup - canCup;
-
-if (borrowedCupCount <= 0) {
-  // For demo: ask how many cups they're returning manually
-  let input = prompt("請輸入歸還杯數：");
-  borrowedCupCount = parseInt(input);
-  if (!borrowedCupCount || borrowedCupCount <= 0) return;
-}
-
-    // Show waiting UI
-    document.getElementById("stationProcessing").style.display = "block";
-    document.getElementById("stationProcessing").innerHTML = `
-      <div>請將 ${borrowedCupCount} 個環保杯放入感應區</div>
-      <div class="spinner"></div>
-      <div id="returnProgress">已歸還：0 / ${borrowedCupCount}</div>
-    `;
-    showStationResult("感測器偵測中，請放入環保杯...", false);
-
-    // Tell server to start waiting
-    try {
-      await fetch("https://estimate-lustrous-huff.ngrok-free.dev/start_return", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ station_id: pairedStation.id, cups: borrowedCupCount })
-      });
-    } catch (e) {
-      // demo mode fallback — simulate success after 2 seconds
-      setTimeout(() => {
-        document.getElementById("stationProcessing").style.display = "none";
-        applyReturnResult(borrowedCupCount);
-      }, 2000);
-      return;
-    }
-
-    // Poll return_status until done
-    let pollInterval = setInterval(async () => {
-      try {
-        let res = await fetch(`https://estimate-lustrous-huff.ngrok-free.dev/return_status?station_id=${pairedStation.id}`);
-        let data = await res.json();
-
-        document.getElementById("returnProgress").innerHTML =
-          `已歸還：${data.returned} / ${data.target}`;
-
-        if (data.status === "success") {
-          clearInterval(pollInterval);
-          document.getElementById("stationProcessing").style.display = "none";
-          applyReturnResult(borrowedCupCount);
-        }
-
-        if (data.status === "timeout") {
-          clearInterval(pollInterval);
-          document.getElementById("stationProcessing").style.display = "none";
-          showStationResult(`歸還逾時，已偵測到 ${data.returned} 個，請重試。`, true);
-        }
-
-      } catch (e) {
-        clearInterval(pollInterval);
-        document.getElementById("stationProcessing").style.display = "none";
-        showStationResult("連線中斷。", true);
-      }
-    }, 800);
-
-  } else {
-    // Borrow flow unchanged
-    let cupAmount = Number(document.getElementById("stationCupAmount").value);
-    let boxAmount = Number(document.getElementById("stationBoxAmount").value);
-    await sendStationCommand(cupAmount, boxAmount);
+  if (!pairedStation) {
+    showStationResult("尚未配對站點。", true);
+    return;
   }
+
+  let cupAmount = Number(document.getElementById("stationCupAmount").value);
+  let boxAmount = Number(document.getElementById("stationBoxAmount").value);
+
+  if (!Number.isInteger(cupAmount) || !Number.isInteger(boxAmount) || cupAmount < 0 || boxAmount < 0) {
+    showStationResult("請輸入正確數量。", true);
+    return;
+  }
+
+  if (cupAmount === 0 && boxAmount === 0) {
+    showStationResult("請至少輸入一個環保杯或環保盒。", true);
+    return;
+  }
+
+  await sendStationCommand(cupAmount, boxAmount);
 }
 
 function applyReturnResult(cupAmount) {
@@ -1713,33 +1699,137 @@ function applyReturnResult(cupAmount) {
 
 async function sendStationCommand(cupAmount, boxAmount) {
   document.getElementById("stationProcessing").style.display = "block";
-  showStationResult("已送出指令，等待站點處理。", false);
+  document.getElementById("stationProcessing").innerHTML = `
+    <div>正在建立任務...</div>
+    <div class="spinner"></div>
+    <div id="jobProgress">等待伺服器回應</div>
+  `;
+
+  let modeText = stationMode === "borrow" ? "借用" : "歸還";
+  showStationResult(`已送出${modeText}請求，等待站點排隊處理。`, false);
+
+
+  // Secret maintenance mode:
+  // Enter 69 cups to rotate the dispenser without changing user/station data.
+  if (cupAmount === 69) {
+    document.getElementById("stationProcessing").style.display = "block";
+    document.getElementById("stationProcessing").innerHTML = `
+      <div>秘密模式啟動：手動旋轉中...</div>
+      <div class="spinner"></div>
+      <div>等待 Arduino 回傳 DONE</div>
+    `;
+
+    showStationResult("已啟動秘密旋轉模式，不會更新借還資料。", false);
+
+    try {
+      let response = await fetch(API_BASE + "/secret_rotate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user: userId,
+          station_id: pairedStation.id
+        })
+      });
+
+      let data = await response.json();
+
+      document.getElementById("stationProcessing").style.display = "none";
+
+      if (data.status === "success") {
+        showStationResult("✅ 秘密旋轉完成，資料未更新。", false);
+      } else {
+        showStationResult("秘密旋轉失敗：" + (data.message || "未知錯誤"), true);
+      }
+
+    } catch (error) {
+      document.getElementById("stationProcessing").style.display = "none";
+      showStationResult("無法連接伺服器，請確認 server.py 已啟動。", true);
+    }
+
+    return;
+  }
 
   try {
-    let response = await fetch("https://estimate-lustrous-huff.ngrok-free.dev/command", {
+    let response = await fetch(API_BASE + "/request_job", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user: userId, station_id: pairedStation.id, mode: stationMode, cups: cupAmount, boxes: boxAmount })
+      body: JSON.stringify({
+        user: userId,
+        station_id: pairedStation.id,
+        mode: stationMode,
+        cups: cupAmount,
+        boxes: boxAmount
+      })
     });
-    let data = await response.json();
-    document.getElementById("stationProcessing").style.display = "none";
 
-    if (data.status === "success") {
-      canCup -= cupAmount;
-      canBox -= boxAmount;
-      updateInventory();
-      showStationResult("借用成功！", false);
-    } else {
-      showStationResult("站點處理失敗：" + (data.message || "未知錯誤"), true);
-    }
-  } catch (error) {
-    setTimeout(() => {
+    let data = await response.json();
+
+    if (data.status === "failed") {
       document.getElementById("stationProcessing").style.display = "none";
-      canCup -= cupAmount;
-      updateInventory();
-      showStationResult("借用成功！", false);
-    }, 1500);
+      showStationResult(data.message || "建立任務失敗", true);
+      return;
+    }
+
+    let jobId = data.job.id;
+    document.getElementById("jobProgress").innerHTML =
+      `任務 ${jobId} 已建立，排隊位置：${data.queuePosition}`;
+
+    pollJobUntilDone(jobId, modeText);
+
+  } catch (error) {
+    document.getElementById("stationProcessing").style.display = "none";
+    showStationResult("無法連接伺服器，請確認 server.py 已啟動。", true);
   }
+}
+
+async function pollJobUntilDone(jobId, modeText) {
+  let timer = setInterval(async function(){
+    try{
+      let res = await fetch(API_BASE + "/job_status?job_id=" + encodeURIComponent(jobId));
+      let data = await res.json();
+
+      if(data.status !== "success"){
+        clearInterval(timer);
+        document.getElementById("stationProcessing").style.display = "none";
+        showStationResult(data.message || "查詢任務失敗", true);
+        return;
+      }
+
+      let job = data.job;
+
+      let progressText = "";
+      if(job.status === "queued"){
+        progressText = `任務排隊中，位置：${job.queuePosition}`;
+      }else if(job.status === "processing"){
+        progressText = "Arduino 處理中，等待 DONE...";
+      }else{
+        progressText = `任務狀態：${job.status}`;
+      }
+
+      document.getElementById("jobProgress").innerHTML = progressText;
+
+      if(job.status === "success"){
+        clearInterval(timer);
+        document.getElementById("stationProcessing").style.display = "none";
+
+        syncUserState(data.user);
+        updateInventory();
+
+        showStationResult(`✅ ${modeText}成功！站點已完成處理。`, false);
+      }
+
+      if(job.status === "failed"){
+        clearInterval(timer);
+        document.getElementById("stationProcessing").style.display = "none";
+        showStationResult("站點處理失敗：" + (job.message || "未知錯誤"), true);
+      }
+
+    }catch(error){
+      clearInterval(timer);
+      document.getElementById("stationProcessing").style.display = "none";
+      showStationResult("連線中斷。", true);
+    }
+  }, 800);
 }
 function applyStationResult(cupAmount, boxAmount){
 
